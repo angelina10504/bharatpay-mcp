@@ -1,3 +1,11 @@
+## Demo
+
+Claude Desktop autonomously calling `lookup_ifsc` for an Indian bank lookup:
+
+![Claude calling bharatpay's lookup_ifsc tool](docs/screenshot-claude-ifsc.png)
+
+---
+
 # 🇮🇳 BharatPay MCP
 
 > **An MCP server that gives any AI agent — Claude Desktop, Cursor, Windsurf — instant access to Indian fintech utilities.** IFSC bank lookups, PAN/GSTIN validation with checksums, mutual fund NAVs, UPI VPA identification, pincode lookups, and Indian-style INR formatting. Seven tools. Zero auth. Zero cost. Designed to complement [Razorpay's official MCP server](https://github.com/razorpay/razorpay-mcp-server) — they handle execution, BharatPay handles validation and lookups.
