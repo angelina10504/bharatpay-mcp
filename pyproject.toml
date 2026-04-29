@@ -37,9 +37,9 @@ dev = [
 bharatpay-mcp = "bharatpay_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/angelinagupta/bharatpay-mcp"
-Repository = "https://github.com/angelinagupta/bharatpay-mcp"
-Issues = "https://github.com/angelinagupta/bharatpay-mcp/issues"
+Homepage = "https://github.com/angelina10504/bharatpay-mcp"
+Repository = "https://github.com/angelina10504/bharatpay-mcp"
+Issues = "https://github.com/angelina10504/bharatpay-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bharatpay_mcp"]

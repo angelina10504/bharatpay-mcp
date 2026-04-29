@@ -1,16 +1,8 @@
-## Demo
-
-Claude Desktop autonomously calling `lookup_ifsc` for an Indian bank lookup:
-
-![Claude calling bharatpay's lookup_ifsc tool](docs/screenshot-claude-ifsc.png)
-
----
-
 # 🇮🇳 BharatPay MCP
 
 > **An MCP server that gives any AI agent — Claude Desktop, Cursor, Windsurf — instant access to Indian fintech utilities.** IFSC bank lookups, PAN/GSTIN validation with checksums, mutual fund NAVs, UPI VPA identification, pincode lookups, and Indian-style INR formatting. Seven tools. Zero auth. Zero cost. Designed to complement [Razorpay's official MCP server](https://github.com/razorpay/razorpay-mcp-server) — they handle execution, BharatPay handles validation and lookups.
 
-🎥 **[60-second demo](https://loom.com/your-link)** · 📦 **[PyPI](https://pypi.org/project/bharatpay-mcp/)** · 💬 **`pip install bharatpay-mcp`**
+🎥 **Demo coming soon** · 📦 **Install: `pip install -e .` from source** (PyPI publish in progress)
 
 ---
 
@@ -24,6 +16,20 @@ Currently, an AI agent has to either hallucinate these answers or call seven dif
 
 Position-wise: BharatPay sits *next to* Razorpay's MCP, not in competition with it. They handle transactions; we handle validation. Use both together for a complete Indian-fintech AI stack.
 
+--- 
+
+## Demo
+
+Claude Desktop autonomously calling `lookup_ifsc` for an Indian bank lookup:
+
+![Tests](https://img.shields.io/badge/tests-17%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![MCP](https://img.shields.io/badge/MCP-compatible-orange)
+
+![Claude calling bharatpay's lookup_ifsc tool](docs/screenshot-claude-ifsc.png)
+
+---
 ## What's in the box
 
 | Tool | Input | What it returns |
@@ -91,7 +97,7 @@ Restart Claude Desktop. Look for the 🔌 icon — `bharatpay` should be listed.
 ### Option 2: From source
 
 ```bash
-git clone https://github.com/angelinagupta/bharatpay-mcp
+git clone https://github.com/angelina10504/bharatpay-mcp
 cd bharatpay-mcp
 pip install -e .
 ```
