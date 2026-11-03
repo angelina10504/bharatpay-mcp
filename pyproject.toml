@@ -29,6 +29,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+api = [
+    "fastapi>=0.115,<1",
+    "pydantic>=2.7,<3",
+    "uvicorn>=0.30,<1",
+    "pymongo>=4.13,<5",
+    "python-multipart>=0.0.18,<1",
+]
 dev = [
     "pytest>=8.0",
 ]
@@ -43,3 +50,7 @@ Issues = "https://github.com/angelina10504/bharatpay-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bharatpay_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

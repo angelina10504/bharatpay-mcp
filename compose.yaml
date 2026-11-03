@@ -1,0 +1,57 @@
+services:
+  mongo:
+    image: mongo:7.0
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+    depends_on:
+      mongo:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  worker:
+    build: .
+    command: ["python", "-m", "bharatpay_mcp.worker"]
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+    depends_on:
+      mongo:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+  airflow:
+    profiles: ["airflow"]
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    command: standalone
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      PYTHONPATH: /opt/project/src
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/pipelines
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - airflow-data:/opt/airflow
+    depends_on:
+      mongo:
+        condition: service_healthy
+    init: true
+volumes:
+  mongo-data:
+  airflow-data:

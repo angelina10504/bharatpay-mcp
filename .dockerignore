@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+.env
+.env.*
+**/__pycache__
+**/.DS_Store
+.pytest_cache
+dist
+build
+docs
+tests
+.venv*
+.sf
+.claude
+.github

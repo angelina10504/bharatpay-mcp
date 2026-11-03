@@ -1,0 +1,58 @@
+name: Python tests
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -e ".[api,dev]"
+      - run: python -m pytest tests/ -q
+      - run: python -c "from bharatpay_mcp.server import mcp; from bharatpay_mcp.api.app import app"
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7.0
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+    env:
+      MONGO_URL: mongodb://127.0.0.1:27017
+      MONGO_DATABASE: bharatpay_ci
+      API_BASE_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[api,dev]"
+      - name: Start backend and worker
+        run: |
+          python -m uvicorn bharatpay_mcp.api.app:app --host 127.0.0.1 --port 8000 > /tmp/bharatpay-api.log 2>&1 &
+          python -m bharatpay_mcp.worker > /tmp/bharatpay-worker.log 2>&1 &
+      - name: Wait for database readiness
+        run: |
+          python - <<'PY'
+          import time, urllib.request
+          for attempt in range(30):
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2)
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit('API did not become ready')
+          PY
+      - run: python scripts/check_backend.py
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          cat /tmp/bharatpay-api.log
+          cat /tmp/bharatpay-worker.log

@@ -8,6 +8,8 @@ Indian numerals use a comma every 2 digits after the first 3 from the right:
 """
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
+
 
 def _indian_comma(n: int) -> str:
     """Format an integer with Indian-style grouping."""
@@ -28,7 +30,7 @@ def _indian_comma(n: int) -> str:
     return ("-" if n < 0 else "") + out
 
 
-def _to_words(amount: float) -> str:
+def _to_words(amount: Decimal) -> str:
     """Convert a number to Indian word form (lakh/crore)."""
     if amount == 0:
         return "Zero"
@@ -36,7 +38,7 @@ def _to_words(amount: float) -> str:
     sign = "Minus " if amount < 0 else ""
     n = abs(amount)
 
-    def _trim(value: float) -> str:
+    def _trim(value: Decimal) -> str:
         # 1.00 -> '1', 1.50 -> '1.5', 1.52 -> '1.52'
         return f"{value:.2f}".rstrip("0").rstrip(".")
 
@@ -46,10 +48,10 @@ def _to_words(amount: float) -> str:
         return f"{sign}{_trim(n / 1_00_000)} Lakh"
     if n >= 1_000:
         return f"{sign}{_trim(n / 1_000)} Thousand"
-    return f"{sign}{n:.0f}"
+    return f"{sign}{_trim(n)}"
 
 
-def format_inr(amount: float, paise: bool = False) -> dict:
+def format_inr(amount: float | Decimal, paise: bool = False) -> dict:
     """Format an INR amount in Indian numbering conventions.
 
     Args:
@@ -70,24 +72,29 @@ def format_inr(amount: float, paise: bool = False) -> dict:
         return {"error": "Amount is required."}
 
     try:
-        value = float(amount)
-    except (TypeError, ValueError):
+        value = Decimal(str(amount))
+    except (InvalidOperation, ValueError, TypeError):
         return {"error": f"Could not parse amount: {amount!r}"}
+    if not value.is_finite() or value.copy_abs() > Decimal("1e15"):
+        return {"error": "Amount must be finite and between -1e15 and 1e15."}
 
-    rupees = value / 100 if paise else value
-    paise_value = int(round(value if paise else value * 100))
-
-    rupee_int = int(rupees)
-    decimal_part = abs(rupees - rupee_int)
-
-    formatted = _indian_comma(rupee_int)
-    if decimal_part > 0.0001:
-        formatted += f".{int(round(decimal_part * 100)):02d}"
+    # Normalize once so display and numeric fields describe the same amount.
+    with localcontext() as context:
+        context.prec = 32
+        paise_value = int(
+            (value if paise else value * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+        rupees = Decimal(paise_value) / 100
+        whole, fraction = divmod(abs(paise_value), 100)
+        formatted = ("-" if paise_value < 0 else "") + _indian_comma(whole)
+        if fraction:
+            formatted += f".{fraction:02d}"
+        words = _to_words(rupees)
 
     return {
-        "rupees": round(rupees, 2),
+        "rupees": float(rupees),
         "paise": paise_value,
         "indian_format": formatted,
         "with_symbol": f"₹{formatted}",
-        "words": _to_words(rupees),
+        "words": words,
     }

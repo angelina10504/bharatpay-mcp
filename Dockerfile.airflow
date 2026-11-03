@@ -1,0 +1,4 @@
+FROM apache/airflow:3.3.2-python3.11
+COPY --chown=airflow:root src /opt/project/src
+COPY --chown=airflow:root pipelines /opt/project/pipelines
+RUN pip install --no-cache-dir "pymongo>=4.13,<5" "httpx>=0.27,<1"

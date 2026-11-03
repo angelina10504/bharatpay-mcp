@@ -11,3 +11,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Optional REST API development environment
+.venv-api/

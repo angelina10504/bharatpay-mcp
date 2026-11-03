@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 import httpx
+from bharatpay_mcp.tools._http import fetch, provider_error
 
 IFSC_PATTERN = re.compile(r"^[A-Z]{4}0[A-Z0-9]{6}$")
 API_ROOT = "https://ifsc.razorpay.com"
@@ -29,7 +30,7 @@ def _validate_format(ifsc: str) -> str | None:
     return None
 
 
-async def lookup_ifsc(ifsc: str) -> dict:
+async def lookup_ifsc(ifsc: str, client: httpx.AsyncClient | None = None) -> dict:
     """Look up bank and branch details for an Indian IFSC code.
 
     Args:
@@ -42,32 +43,19 @@ async def lookup_ifsc(ifsc: str) -> dict:
     """
     err = _validate_format(ifsc)
     if err:
-        return {"error": err, "ifsc": ifsc}
+        return {"error": err, "ifsc": ifsc, "error_code": "invalid_input"}
 
     code = ifsc.strip().upper()
     url = f"{API_ROOT}/{code}"
 
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            r = await client.get(url)
-    except httpx.RequestError as e:
-        return {"error": f"Network error reaching IFSC API: {e}", "ifsc": code}
+        r = await fetch(url, client)
+        data = r.json()
+        if not isinstance(data, dict) or data.get("IFSC") != code or not data.get("BANK"):
+            raise ValueError("Unexpected IFSC payload")
+    except (httpx.HTTPError, ValueError) as exc:
+        return {**provider_error(exc), "ifsc": code}
 
-    if r.status_code == 404:
-        return {
-            "error": (
-                "IFSC code not found. The format is valid but this code does "
-                "not exist in the RBI dataset."
-            ),
-            "ifsc": code,
-        }
-    if r.status_code != 200:
-        return {
-            "error": f"IFSC API returned HTTP {r.status_code}.",
-            "ifsc": code,
-        }
-
-    data = r.json()
     return {
         "ifsc": data.get("IFSC"),
         "bank": data.get("BANK"),
