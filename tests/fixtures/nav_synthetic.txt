@@ -1,0 +1,4 @@
+Scheme Code;ISIN;ISIN;Scheme Name;Net Asset Value;Date
+990001;-;-;Synthetic Alpha Fund;10.25;02-Nov-2026
+990002;-;-;Synthetic Beta Fund;Direct;Growth;12.50;03-Nov-2026
+990003;-;-;Synthetic Invalid Fund;N.A.;03-Nov-2026

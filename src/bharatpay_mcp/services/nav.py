@@ -13,9 +13,9 @@ from bharatpay_mcp.tools._http import fetch
 AMFI_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 
 
-def parse_nav(text: str) -> tuple[list[dict], list[dict]]:
+def parse_nav(text: str, *, allow_empty: bool = False) -> tuple[list[dict], list[dict]]:
     """Return normalized records and rejected numeric rows, without I/O."""
-    records, rejected = [], []
+    records, rejected, keys = [], [], set()
     for number, raw in enumerate(text.splitlines(), 1):
         parts = [part.strip() for part in raw.split(";")]
         if not parts[0].isdigit():
@@ -27,6 +27,9 @@ def parse_nav(text: str) -> tuple[list[dict], list[dict]]:
             if not nav.is_finite() or nav < 0:
                 raise ValueError("NAV must be finite and nonnegative")
             date = datetime.strptime(parts[-1], "%d-%b-%Y").date().isoformat()
+            if (parts[0], date) in keys:
+                raise ValueError("Duplicate scheme/date in source")
+            keys.add((parts[0], date))
             records.append({
                 "scheme_code": parts[0], "isin_payout": None if parts[1] == "-" else parts[1],
                 "isin_reinvest": None if parts[2] == "-" else parts[2],
@@ -34,9 +37,10 @@ def parse_nav(text: str) -> tuple[list[dict], list[dict]]:
                 "plan": parts[4] if len(parts) == 8 else None,
                 "option": parts[5] if len(parts) == 8 else None,
             })
-        except (ValueError, InvalidOperation) as exc:
-            rejected.append({"line": number, "reason": str(exc)})
-    if not records:
+        except (ValueError, InvalidOperation):
+            # Never echo arbitrary source content in diagnostics.
+            rejected.append({"line": number, "reason": "Invalid fields, NAV, date or duplicate scheme/date"})
+    if not records and not allow_empty:
         raise ValueError("AMFI returned no usable NAV records")
     return records, rejected
 
