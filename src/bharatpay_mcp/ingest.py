@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import os
+from pathlib import Path
 
 import httpx
 
@@ -11,16 +13,20 @@ from bharatpay_mcp.services.ingestion import ingest_nav
 from bharatpay_mcp.storage import Store
 
 
-async def main():
+async def main(*, trigger: str = "cli", fixture: Path | None = None):
     store = Store(os.environ["MONGO_URL"])
     await store.start()
     try:
         async with httpx.AsyncClient() as client:
-            result = await ingest_nav(store, client)
+            result = await ingest_nav(store, client, trigger=trigger, fixture=fixture)
             print(json.dumps(result, default=str))
+            return result
     finally:
         await store.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fixture", type=Path, help="Replay a retained AMFI text file without HTTP")
+    args = parser.parse_args()
+    asyncio.run(main(fixture=args.fixture))

@@ -16,6 +16,7 @@ import httpx
 from bharatpay_mcp.services.ingestion import ingest_nav
 from bharatpay_mcp.storage import Store, now
 from bharatpay_mcp.worker import process_job
+from check_nav import run_nav_checks
 
 
 async def main():
@@ -101,6 +102,7 @@ async def main():
                 await ingest_nav(isolated, source)
             assert await isolated.db.nav_snapshots.count_documents({}) == 1
             assert await isolated.db.ingestion_runs.count_documents({"status": "completed", "rejected_count": 1}) == 2
+            await run_nav_checks(os.environ["MONGO_URL"])
             print(f"PASS: {checks} HTTP checks; ownership, durable CSV worker, report safety, logout, Mongo lease recovery, idempotent ETL.")
         finally:
             for collection in ["users", "sessions", "vendors", "validation_runs", "batch_jobs", "batch_rows"]:

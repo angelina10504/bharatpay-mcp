@@ -18,6 +18,13 @@ with DAG(
     @task
     def ingest_daily_nav():
         from bharatpay_mcp.ingest import main
-        asyncio.run(main())
+        from airflow.exceptions import AirflowFailException
+        from bharatpay_mcp.services.nav_source import IngestionError
+        try:
+            return asyncio.run(main(trigger="airflow"))
+        except IngestionError as error:
+            if not error.retryable:
+                raise AirflowFailException(str(error)) from None
+            raise
 
     ingest_daily_nav()

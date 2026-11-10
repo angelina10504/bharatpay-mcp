@@ -38,6 +38,9 @@ class Store:
         await self.db.batch_rows.create_index([("job_id", 1), ("row_number", 1)], unique=True)
         await self.db.nav_snapshots.create_index([("scheme_code", 1), ("date", 1)], unique=True)
         await self.db.ingestion_runs.create_index([("created_at", -1)])
+        await self.db.ingestion_runs.create_index([("status", 1), ("finished_at", -1)])
+        await self.db.ingestion_runs.create_index([("job_id", 1), ("created_at", -1)])
+        await self.db.worker_states.create_index("expires_at", expireAfterSeconds=0)
 
     async def close(self):
         await self.client.close()
@@ -61,12 +64,19 @@ class Store:
             query, {"$set": {**values, "updated_at": now()}}, return_document=ReturnDocument.AFTER)
 
     async def claim(self) -> dict | None:
+        expired = {"$expr": {"$lte": ["$lease_until", "$$NOW"]}}
         await self.db.batch_jobs.update_many(
-            {"status": "running", "lease_until": {"$lt": now()}, "attempts": {"$gte": 3}},
-            {"$set": {"status": "failed", "error": "Worker lease expired after three attempts"}})
+            {"status": "running", **expired, "attempts": {"$gte": 3}},
+            [{"$set": {"status": "failed", "error": "Worker lease expired after three attempts",
+                       "error_category": "lease_expired", "finished_at": "$$NOW"}}])
         return await self.db.batch_jobs.find_one_and_update(
             {"attempts": {"$lt": 3}, "$or": [
-                {"status": "queued"}, {"status": "running", "lease_until": {"$lt": now()}}]},
-            {"$set": {"status": "running", "lease_until": now() + timedelta(seconds=120),
-                      "lease_token": str(uuid4()), "updated_at": now()}, "$inc": {"attempts": 1}},
+                {"status": "queued", "$expr": {"$lte": [{"$ifNull": ["$available_at", now() - timedelta(days=1)]}, "$$NOW"]}},
+                {"status": "running", **expired}]},
+            [{"$set": {"status": "running",
+                       "lease_until": {"$dateAdd": {"startDate": "$$NOW", "unit": "second", "amount": 120}},
+                       "lease_token": str(uuid4()), "updated_at": "$$NOW",
+                       "attempts": {"$add": ["$attempts", 1]},
+                       "lease_reclaims": {"$add": [{"$ifNull": ["$lease_reclaims", 0]},
+                                                   {"$cond": [{"$eq": ["$status", "running"]}, 1, 0]}]}}}],
             sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)

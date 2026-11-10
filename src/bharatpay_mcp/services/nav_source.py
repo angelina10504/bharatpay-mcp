@@ -22,6 +22,11 @@ class IngestionError(RuntimeError):
         self.category = category
         super().__init__(diagnostic)
 
+    @property
+    def retryable(self):
+        return self.category in {"coordination_busy", "source_timeout", "source_network", "source_http",
+                                 "database", "lease_lost", "interrupted"}
+
 
 @dataclass(frozen=True)
 class QualityRules:
