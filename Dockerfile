@@ -4,6 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
+COPY scripts ./scripts
+COPY tests/fixtures ./tests/fixtures
 RUN pip install --no-cache-dir ".[api]" && useradd --create-home appuser
 USER appuser
 EXPOSE 8000

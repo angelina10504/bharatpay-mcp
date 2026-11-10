@@ -1,0 +1,47 @@
+# Opt-in fresh replica-set deployment. This replaces the container data mount
+# with a NEW named volume; it does not migrate or delete mongo-data.
+# Always use a new project name and free API/Airflow ports; see deployment notes.
+services:
+  mongo:
+    command: ["mongod", "--replSet", "bharatpay-rs", "--bind_ip_all"]
+    volumes:
+      - nav-rs-data:/data/db
+  mongo-init:
+    image: mongo:7.0
+    depends_on:
+      mongo:
+        condition: service_healthy
+    entrypoint: ["mongosh", "--quiet", "--host", "mongo", "--eval"]
+    command:
+      - >-
+        try { rs.status(); } catch (e) {
+          if (e.code !== 94) throw e;
+          rs.initiate({_id:'bharatpay-rs',members:[{_id:0,host:'mongo:27017'}]});
+        }
+        let ready = false;
+        for (let n=0; n<60; n++) {
+          if (db.hello().isWritablePrimary) { ready = true; break; }
+          sleep(500);
+        }
+        if (!ready) throw new Error('Replica set did not elect a primary');
+    restart: "no"
+  api:
+    environment:
+      MONGO_URL: mongodb://mongo:27017/?replicaSet=bharatpay-rs
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+  worker:
+    environment:
+      MONGO_URL: mongodb://mongo:27017/?replicaSet=bharatpay-rs
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+  airflow:
+    environment:
+      MONGO_URL: mongodb://mongo:27017/?replicaSet=bharatpay-rs
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+volumes:
+  nav-rs-data:

@@ -21,6 +21,7 @@ from pymongo.errors import DuplicateKeyError
 from bharatpay_mcp.security import hash_password, verify_password, token_hash
 from bharatpay_mcp.services.batches import parse_csv
 from bharatpay_mcp.services.vendors import validate_vendor
+from bharatpay_mcp.services.nav_metrics import ingestion_metrics
 from bharatpay_mcp.storage import Store, now, public
 
 router = APIRouter(prefix="/api/v1")
@@ -238,6 +239,11 @@ async def retry_job(id: str, user: OwnerDep, store: StoreDep):
     if not result:
         raise HTTPException(409, "Job must be failed or completed with errors to retry")
     return public(result)
+
+
+@router.get("/ingestions/metrics", tags=["NAV data"])
+async def nav_metrics(user: OwnerDep, store: StoreDep):
+    return await ingestion_metrics(store)
 
 
 @router.post("/ingestions/nav", status_code=202, tags=["NAV data"])

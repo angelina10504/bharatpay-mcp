@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -10,6 +11,7 @@ import pytest
 from bharatpay_mcp.services import ingestion
 from bharatpay_mcp.services.nav_coordination import LeaseLost, NavLease, require_transactions
 from bharatpay_mcp.services.nav_source import IngestionError
+from bharatpay_mcp.services.nav_metrics import observed_time, run_metrics
 
 
 def test_standalone_is_rejected_before_snapshot_writes():
@@ -27,6 +29,20 @@ def test_standalone_is_rejected_before_snapshot_writes():
         store.db.nav_snapshots.bulk_write.assert_not_called()
         store.client.start_session.assert_not_called()
     asyncio.run(exercise())
+
+
+def test_legacy_run_write_metrics_are_unknown():
+    metrics = run_metrics({"_id": "old", "accepted": 100, "status": "completed"})
+    assert metrics["accepted"] == 100 and metrics["upserted_count"] is None
+    assert metrics["matched_count"] is None and metrics["duration_seconds"] is None
+    assert run_metrics(None) is None
+
+
+def test_command_clock_and_document_clock_are_compatible():
+    naive = datetime(2026, 11, 11, 12)
+    aware = naive.replace(tzinfo=timezone.utc)
+    assert observed_time({"localTime": naive}) == observed_time({"localTime": aware}) == aware
+    assert (observed_time({"localTime": naive}) - aware).total_seconds() == 0
 
 
 @pytest.mark.parametrize("hello", [{"setName": "rs", "maxWireVersion": 21},

@@ -9,7 +9,9 @@ venv
 dist
 build
 docs
-tests
+tests/**
+!tests/fixtures/
+!tests/fixtures/**
 .venv*
 .sf
 .claude

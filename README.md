@@ -10,15 +10,20 @@ MongoDB, accounts, or the API extra. No tools move money.
 ### Run the complete local backend
 
 ```bash
-docker compose up --build -d --wait
+API_PORT=8011 AIRFLOW_PORT=8081 docker compose -p bharatpay-nav-demo \
+  -f compose.yaml -f compose.nav-replica.yaml up --build -d --wait
 ```
 
-Open http://127.0.0.1:8000 for the responsive dashboard, or
-http://127.0.0.1:8000/docs for interactive API documentation. The dashboard covers
+Open http://127.0.0.1:8011 for the responsive dashboard, or
+http://127.0.0.1:8011/docs for interactive API documentation. The dashboard covers
 sign-in, vendor CRUD, validation, CSV upload/results/reports and NAV history.
 Compose starts the API, a separate worker and
-MongoDB; MongoDB data lives in the `mongo-data` volume and has no host port.
-Stop using `docker compose down`; omit `--volumes` to preserve saved records.
+MongoDB. This opt-in deployment creates a new `nav-rs-data` volume in a separate
+project; it does not migrate or delete an existing `mongo-data` volume. MongoDB
+has no host port. Stop with the same project/files and `down` without `--volumes`.
+The base `compose.yaml` alone still uses standalone MongoDB: NAV ingestion now
+fails closed there, because fencing requires replica-set transactions.
+Read the [deployment and rollback guide](docs/nav-reliability.md#deployment-and-rollback) before upgrading an existing installation.
 `/health` is liveness; `/ready` also checks the configured database.
 
 1. Use `POST /api/v1/auth/register` with a username (3–40 letters, digits, dots,
@@ -47,7 +52,7 @@ All application routes below start with `/api/v1`.
 | Vendors | POST/GET `/vendors`; GET/PUT/DELETE `/vendors/{id}`; POST `/vendors/{id}/validate` |
 | History | GET `/validation-runs`, `/stats` |
 | Durable jobs | POST/GET `/batch-jobs`; GET `/batch-jobs/{id}`, `/{id}/results`, `/{id}/report.csv`; POST `/{id}/retry` |
-| Public-source ingestion | POST `/ingestions/nav`; GET `/ingestion-runs`, `/funds/{scheme_code}/nav-history` |
+| Public-source ingestion | POST `/ingestions/nav`; GET `/ingestion-runs`, `/ingestions/metrics`, `/funds/{scheme_code}/nav-history` |
 
 Vendor, job, history and ingestion routes require a bearer token. List routes
 support `page` and `page_size` (maximum 100). Public-source ingestion history is
@@ -57,7 +62,7 @@ return 404, without revealing another account's record.
 Malformed request bodies return 422. Offline validation results use 200 with
 `valid: false` for a completed domain check. Lookup routes distinguish invalid
 input (422), missing records (404), provider failure (502) and timeout (504).
-The API owns a shared async HTTP client. NAV refresh is protected by a lock;
+The API owns a shared async HTTP client. The process-local lookup-cache refresh is protected by a lock;
 when refresh fails, older cached data is explicitly marked `stale: true`.
 NAV dates are source-record dates (ISO); `fetched_at` is download time. NAV
 values are decimal strings. INR uses half-up rounding to integer paise.
@@ -74,33 +79,76 @@ python -m uvicorn bharatpay_mcp.api.app:app --reload
 
 Without `MONGO_URL`, pure validation and lookup routes work; saved workflows
 explicitly return 503. For the full persistence flow, use Compose, which supplies
-`MONGO_URL=mongodb://mongo:27017`. `MONGO_DATABASE` defaults to `bharatpay`.
+`MONGO_URL`; the replica-set override adds `replicaSet=bharatpay-rs`. `MONGO_DATABASE` defaults to `bharatpay`.
 The offline suite mocks providers and requires no database. To explicitly test
 the running API, MongoDB indexes, worker, lease recovery and ETL replay:
 
 ```bash
-docker compose exec -T api python < scripts/check_backend.py
+python scripts/run_isolated_checks.py
 ```
 
-The integration check creates synthetic accounts and removes only its own data;
-a uniquely named temporary database is created and dropped for recovery/ETL tests.
+This local runner requires `mongod` on PATH. It creates temporary replica-set and
+standalone MongoDB processes, API/worker processes, free ports and synthetic data;
+then stops only its processes and removes their temporary directories. No existing
+service or volume is used. To run checks inside a **separately deployed test project**,
+use `python scripts/check_backend.py` in its API container. Never point the backend
+integration check at production. See [test commands and results](docs/nav-reliability.md#validation).
 
 ### Standalone ETL and optional Airflow
 
 ```bash
-docker compose exec api python -m bharatpay_mcp.ingest
-docker compose --profile airflow up --build -d airflow
+API_PORT=8011 AIRFLOW_PORT=8081 docker compose -p bharatpay-nav-demo \
+  -f compose.yaml -f compose.nav-replica.yaml exec api python -m bharatpay_mcp.ingest
+# Use the same project/files plus --profile airflow to start the optional DAG service.
+# Offline source replay (still writes to the configured DB; use a test deployment):
+python -m bharatpay_mcp.ingest --fixture tests/fixtures/nav_synthetic.txt
 ```
 
-The optional local Airflow standalone instance is at http://127.0.0.1:8080. Its
+The optional local Airflow standalone instance uses port 8081 with the settings above. Its
 authentication details are generated by Airflow in the container; follow its
 startup logs/local authentication configuration. The `bharatpay_daily_nav` DAG
 runs weekdays at 19:00 UTC with two retries, no catchup, and one active run. It
 calls the same ETL used by the CLI and worker. Unpause the DAG in Airflow to enable
-scheduled runs; a manual DAG test has been verified. Both the current eight-column
+scheduled runs. The current DAG changes have not been executed in Airflow during
+this reliability upgrade; the integration suite exercises its shared service with an Airflow trigger. Both the current eight-column
 and legacy six-column AMFI formats are supported. The latest AMFI file cannot recreate
 historical dates: this project accumulates history from each successful fetch;
 Airflow backfill does not magically provide older source data.
+
+### NAV ingestion architecture
+
+```mermaid
+flowchart TD
+    API[FastAPI queue endpoint] --> Jobs[(Mongo job queue)]
+    Jobs --> Worker[Async worker]
+    CLI[CLI / fixture replay] --> ETL[Shared ingestion service]
+    DAG[Airflow daily task] --> ETL
+    Worker --> ETL
+    Source[Streamed AMFI bytes or saved fixture] --> Hash[SHA-256 and quality checks]
+    ETL --> Source
+    Hash --> Tx[Per-batch fenced transaction]
+    subgraph RS[MongoDB replica set]
+      Tx --> Lease[(Global lease and version)]
+      Tx --> NAV[(Unique scheme/date upserts)]
+      Tx --> Runs[(Run metadata and exact counters)]
+      Tx --> Done[(Worker completion on final transaction)]
+    end
+    Runs --> Metrics[Authenticated ingestion metrics]
+    Jobs --> Metrics
+    Presence[Worker heartbeat] --> Metrics
+    Metrics --> Dashboard[Existing FastAPI dashboard]
+```
+
+Every snapshot transaction writes the global lease document first. After a newer
+owner acquires it, an old transaction cannot commit a snapshot write. This is
+per-batch atomicity; earlier committed batches survive a later failure. Completed
+runs distinguish accepted source rows from new inserts and existing matches.
+The authenticated `GET /api/v1/ingestions/metrics` endpoint reports ingestion and
+worker health; the NAV dashboard shows those metrics. MCP and public search use
+their existing process-local cache, independently of stored NAV history.
+
+See the [baseline audit](docs/nav-reliability-audit.md) and
+[design, metric definitions, fault tests, deployment and remaining risks](docs/nav-reliability.md).
 
 ### Scope and limits
 

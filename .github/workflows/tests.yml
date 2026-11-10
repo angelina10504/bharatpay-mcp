@@ -16,15 +16,9 @@ jobs:
       - run: python -c "from bharatpay_mcp.server import mcp; from bharatpay_mcp.api.app import app"
   integration:
     runs-on: ubuntu-latest
-    services:
-      mongo:
-        image: mongo:7.0
-        ports: ["27017:27017"]
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
-          --health-interval 5s --health-timeout 5s --health-retries 15
     env:
-      MONGO_URL: mongodb://127.0.0.1:27017
+      MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=navtest
+      NAV_TEST_MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=navtest
       MONGO_DATABASE: bharatpay_ci
       API_BASE_URL: http://127.0.0.1:8000
     steps:
@@ -33,6 +27,30 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install -e ".[api,dev]"
+      - name: Start isolated test replica set
+        run: |
+          docker run --rm -d --name bharatpay-nav-ci -p 127.0.0.1:27017:27017 mongo:7.0 --replSet navtest --bind_ip_all
+          python - <<'PY'
+          import time
+          from pymongo import MongoClient
+          client = MongoClient('mongodb://127.0.0.1:27017/?directConnection=true', serverSelectionTimeoutMS=500)
+          for attempt in range(60):
+              try:
+                  client.admin.command('ping')
+                  break
+              except Exception:
+                  time.sleep(0.5)
+          else:
+              raise SystemExit('Test Mongo did not start')
+          client.admin.command('replSetInitiate', {'_id':'navtest','members':[{'_id':0,'host':'127.0.0.1:27017'}]})
+          for attempt in range(60):
+              if client.admin.command('hello').get('isWritablePrimary'):
+                  break
+              time.sleep(0.5)
+          else:
+              raise SystemExit('Test replica set did not become ready')
+          client.close()
+          PY
       - name: Start backend and worker
         run: |
           python -m uvicorn bharatpay_mcp.api.app:app --host 127.0.0.1 --port 8000 > /tmp/bharatpay-api.log 2>&1 &
@@ -51,8 +69,12 @@ jobs:
               raise SystemExit('API did not become ready')
           PY
       - run: python scripts/check_backend.py
+      - run: python -m pytest integration/ -q
       - name: Failure diagnostics
         if: failure()
         run: |
           cat /tmp/bharatpay-api.log
           cat /tmp/bharatpay-worker.log
+      - name: Stop only the test Mongo container
+        if: always()
+        run: docker stop bharatpay-nav-ci || true

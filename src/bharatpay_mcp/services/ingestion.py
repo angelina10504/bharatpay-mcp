@@ -47,6 +47,7 @@ async def ingest_nav(store: Store, client: httpx.AsyncClient, job_id: str | None
         if not job or not job.get("lease_token"):
             raise LeaseLost()
     run_id, started = str(uuid4()), now()
+    lease = NavLease(store, run_id, job=job, seconds=lease_seconds)
     await store.insert("ingestion_runs", {
         "_id": run_id, "run_id": run_id, "trigger": trigger, "job_id": job_id,
         "status": "starting", "source": AMFI_URL, "source_kind": "fixture" if fixture else "http",
@@ -56,8 +57,6 @@ async def ingest_nav(store: Store, client: httpx.AsyncClient, job_id: str | None
         "matched_count": 0, "upserted_count": 0, "modified_count": 0, "batches_committed": 0,
         "source_date_min": None, "source_date_max": None, "error_category": None, "diagnostic": None,
         "write_outcome": "not_started"})
-    lease = NavLease(store, run_id, job=job, seconds=lease_seconds)
-
     async def work():
         quality = rules or QualityRules.from_env()
         limit = byte_limit()

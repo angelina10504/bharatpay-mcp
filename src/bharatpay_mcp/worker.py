@@ -89,7 +89,7 @@ async def process_job(store: Store, client: httpx.AsyncClient, job: dict):
         for finished in done:
             finished.result()
     except Exception:
-        logger.exception("Job processing failed: %s", job["_id"])
+        logger.warning("Job processing failed: %s", job["_id"])
         await store.update("batch_jobs", query, {"status": "queued" if job["attempts"] < 3 else "failed",
                                                  "error": "Processing failed; automatic retry limited to 3 attempts"})
         await asyncio.sleep(min(job["attempts"] * 2, 6))
@@ -129,7 +129,7 @@ async def main():
                     else:
                         await asyncio.sleep(2)
                 except Exception:
-                    logger.exception("Worker iteration failed")
+                    logger.warning("Worker iteration failed; database or provider may be unavailable")
                     await asyncio.sleep(5)
     finally:
         heartbeat_task.cancel()

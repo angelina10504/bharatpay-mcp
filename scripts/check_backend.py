@@ -46,6 +46,9 @@ async def main():
                 token = (await call("POST", "/api/v1/auth/login", json=creds)).json()["access_token"]
                 tokens.append(token)
             a, b = tokens
+            await call("GET", "/api/v1/ingestions/metrics", status=401)
+            metrics = (await call("GET", "/api/v1/ingestions/metrics", a)).json()
+            assert metrics["transaction_capable"] and metrics["workers"]["active"] >= 1
             await call("GET", "/api/v1/vendors", status=401)
             vendor = (await call("POST", "/api/v1/vendors", a, status=201,
                                  json={"name": "Synthetic demo", "pan": "ABCPE1234F"})).json()

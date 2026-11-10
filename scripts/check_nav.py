@@ -6,10 +6,13 @@ Run: python scripts/check_nav.py
 from __future__ import annotations
 
 import asyncio
+import argparse
 from contextlib import asynccontextmanager
+from datetime import timedelta
 import hashlib
 import os
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -18,6 +21,7 @@ from pymongo.errors import OperationFailure
 from bharatpay_mcp.services.ingestion import ingest_nav
 from bharatpay_mcp.services.nav_coordination import EPOCH, LEASE_ID, IngestionBusy, LeaseLost, NavLease, reconcile_nav_runs
 from bharatpay_mcp.services.nav_source import IngestionError, QualityRules
+from bharatpay_mcp.services.nav_metrics import ingestion_metrics
 from bharatpay_mcp.storage import Store, now
 from bharatpay_mcp.worker import process_job
 
@@ -225,6 +229,9 @@ async def ordered_commit_and_reconciliation(url):
         assert await reconcile_nav_runs(store) == 1
         await expect_error(new.fenced(stale_write), 'lease_lost')
         assert (await store.db.ingestion_runs.find_one({'_id': new.run_id}))['status'] == 'interrupted'
+        orphan = await store.insert('ingestion_runs', {'status': 'starting', 'created_at': now() - timedelta(minutes=5)})
+        assert await reconcile_nav_runs(store) == 1
+        assert (await store.db.ingestion_runs.find_one({'_id': orphan['_id']}))['duration_seconds'] >= 300
 
 
 async def renewal_and_cancellation(url):
@@ -272,12 +279,67 @@ async def disconnect_and_reconcile(url):
             await replacement.close()
 
 
+async def oversize_and_metrics(url):
+    class Stream(httpx.AsyncByteStream):
+        reads = 0
+        closed = False
+        async def __aiter__(self):
+            for _ in range(100):
+                self.reads += 1
+                yield b'x' * 32768
+        async def aclose(self):
+            self.closed = True
+    async with database(url) as store:
+        stream = Stream()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream))) as client:
+            with patch.dict(os.environ, {'NAV_MAX_SOURCE_BYTES': '40000'}):
+                await expect_error(ingest_nav(store, client), 'source_size')
+        assert stream.reads == 2 and stream.closed
+        run = await store.db.ingestion_runs.find_one({})
+        assert run['source_sha256'] is None and run['source_bytes'] is None and not run['source_complete']
+        metrics = await ingestion_metrics(store)
+        assert metrics['last_completed'] is None and metrics['consecutive_failures'] == 1
+        async with source() as client:
+            await ingest_nav(store, client)
+        metrics = await ingestion_metrics(store)
+        assert metrics['consecutive_failures'] == 0
+        assert metrics['last_completed']['upserted_count'] == 2
+        assert metrics['last_completed']['source_sha256'] == hashlib.sha256(CONTENT).hexdigest()
+        assert metrics['transaction_capable'] and metrics['lease']['owner_run_id'] is None
+        async with source(b'') as client:
+            await expect_error(ingest_nav(store, client), 'parse')
+        metrics = await ingestion_metrics(store)
+        assert metrics['consecutive_failures'] == 1 and metrics['last_failure']['error_category'] == 'parse'
+        assert metrics['source_freshness_days'] is not None and metrics['last_completed_age_seconds'] >= 0
+        # Old run counters must stay unknown in last-run views, rather than being
+        # invented from accepted source rows.
+        legacy = await store.insert('ingestion_runs', {'status': 'completed', 'finished_at': now(), 'accepted': 100})
+        metrics = await ingestion_metrics(store)
+        assert metrics['last_completed']['run_id'] == legacy['_id']
+        assert metrics['last_completed']['upserted_count'] is None and metrics['legacy_runs_without_write_counts'] == 1
+
+
+async def standalone_rejection(url):
+    async with database(url) as store:
+        hello = await store.db.command('hello')
+        assert 'setName' not in hello, 'Use an isolated standalone server for this check'
+        def forbidden(request):
+            raise AssertionError('Standalone must fail before downloading')
+        async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as client:
+            await expect_error(ingest_nav(store, client), 'topology')
+        run = await store.db.ingestion_runs.find_one({})
+        assert run['status'] == 'failed' and run['error_category'] == 'topology'
+        assert await store.db.nav_snapshots.count_documents({}) == 0
+        assert not (await ingestion_metrics(store))['transaction_capable']
+    print('PASS NAV: actual standalone MongoDB fails closed before source or snapshot writes')
+
+
 async def run_nav_checks(url):
     # The replica-set requirement is checked by ingestion itself; refuse to
     # downgrade the tests silently when pointed at a standalone server.
     checks = [replay_and_metadata, bad_feeds, bulk_failures, concurrent_entrypoints,
               claims_and_stale_writers, expired_worker_token, ordered_commit_and_reconciliation,
-              renewal_and_cancellation, disconnect_and_reconcile]
+              renewal_and_cancellation, disconnect_and_reconcile, oversize_and_metrics]
     for check in checks:
         await asyncio.wait_for(check(url), 45)
         print('PASS NAV:', check.__name__)
@@ -285,4 +347,7 @@ async def run_nav_checks(url):
 
 
 if __name__ == '__main__':
-    asyncio.run(run_nav_checks(os.environ['MONGO_URL']))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--standalone', action='store_true')
+    args = parser.parse_args()
+    asyncio.run((standalone_rejection if args.standalone else run_nav_checks)(os.environ['MONGO_URL']))

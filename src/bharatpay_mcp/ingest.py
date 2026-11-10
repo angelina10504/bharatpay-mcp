@@ -6,21 +6,25 @@ import argparse
 import json
 import os
 from pathlib import Path
+from pymongo.errors import PyMongoError
 
 import httpx
 
 from bharatpay_mcp.services.ingestion import ingest_nav
+from bharatpay_mcp.services.nav_source import IngestionError
 from bharatpay_mcp.storage import Store
 
 
 async def main(*, trigger: str = "cli", fixture: Path | None = None):
     store = Store(os.environ["MONGO_URL"])
-    await store.start()
     try:
+        await store.start()
         async with httpx.AsyncClient() as client:
             result = await ingest_nav(store, client, trigger=trigger, fixture=fixture)
             print(json.dumps(result, default=str))
             return result
+    except PyMongoError:
+        raise IngestionError("database", "NAV database is unavailable") from None
     finally:
         await store.close()
 

@@ -1,3 +1,9 @@
+x-nav-environment: &nav-environment
+  NAV_MAX_SOURCE_BYTES: ${NAV_MAX_SOURCE_BYTES:-15000000}
+  NAV_MIN_RECORDS: ${NAV_MIN_RECORDS:-1}
+  NAV_MAX_REJECTED_FRACTION: ${NAV_MAX_REJECTED_FRACTION:-1}
+  NAV_MAX_SOURCE_AGE_DAYS: ${NAV_MAX_SOURCE_AGE_DAYS:-}
+  NAV_MAX_FUTURE_DAYS: ${NAV_MAX_FUTURE_DAYS:-}
 services:
   mongo:
     image: mongo:7.0
@@ -11,8 +17,9 @@ services:
   api:
     build: .
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     environment:
+      <<: *nav-environment
       MONGO_URL: mongodb://mongo:27017
     depends_on:
       mongo:
@@ -27,6 +34,7 @@ services:
     build: .
     command: ["python", "-m", "bharatpay_mcp.worker"]
     environment:
+      <<: *nav-environment
       MONGO_URL: mongodb://mongo:27017
     depends_on:
       mongo:
@@ -40,12 +48,13 @@ services:
       dockerfile: Dockerfile.airflow
     command: standalone
     environment:
+      <<: *nav-environment
       MONGO_URL: mongodb://mongo:27017
       PYTHONPATH: /opt/project/src
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/project/pipelines
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
     volumes:
       - airflow-data:/opt/airflow
     depends_on:
