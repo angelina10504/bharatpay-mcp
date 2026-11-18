@@ -13,6 +13,11 @@ It deliberately complements Razorpay's official MCP server rather than competing
 Razorpay executes transactions, BharatPay validates and enriches. Keep that boundary —
 don't add tools that move money or need credentials.
 
+The repo also holds an optional FastAPI "workbench" (accounts, private vendor records,
+CSV batch jobs, NAV history and health metrics) backed by MongoDB, a queue worker, and
+an optional Airflow DAG. It reuses the same tool functions. The MCP server must keep
+working with none of it installed. Operator guide: [docs/operations.md](docs/operations.md).
+
 ## Layout
 
 ```
@@ -21,8 +26,16 @@ src/bharatpay_mcp/
   __main__.py      # `python -m bharatpay_mcp` → server.main()
   tools/           # one module per domain; all real logic lives here
     gstin.py  ifsc.py  inr.py  mutual_fund.py  pan.py  pincode.py  upi.py
-tests/test_validators.py   # offline validators only, no network
+  api/             # optional FastAPI workbench; routes stay thin over services/
+  services/        # NAV parse/ETL/fencing/metrics, CSV parsing, vendor checks
+  storage.py       # MongoDB indexes and atomic job leases
+  worker.py        # `python -m bharatpay_mcp.worker`: leased jobs, presence, reconciliation
+  ingest.py        # one-shot NAV ingestion CLI (`--fixture` for offline replay)
+pipelines/nav_daily.py     # optional Airflow DAG; calls the shared ingestion service
+tests/                     # offline only: no network, no database
+integration/               # real-Mongo NAV scenarios; skipped unless NAV_TEST_MONGO_URL is set
 scripts/smoke_test.py      # manual end-to-end incl. live APIs (not part of pytest)
+scripts/check_*.py, scripts/run_isolated_checks.py  # explicit real-Mongo / Airflow / health checks
 ```
 
 ## Engineering standards
@@ -44,9 +57,9 @@ The point is graceful degradation: when `ifsc.razorpay.com` or India Post is dow
 malformed IFSC still gets a precise, useful answer, and a well-formed one gets an
 honest network error — never a traceback across the MCP boundary.
 
-**Known gap:** [mutual_fund.py](src/bharatpay_mcp/tools/mutual_fund.py) only checks for
-an empty query before hitting AMFI. If you touch that file, add a real offline
-validator (scheme codes are digits; name fragments have a minimum length) and a test.
+`get_mutual_fund_nav` validates through `validate_query` in
+[services/nav.py](src/bharatpay_mcp/services/nav.py) (digits, or a 3–120 character
+name fragment) before any AMFI fetch.
 
 ### 2. Tools return dicts, never raise
 
@@ -70,21 +83,20 @@ returned dicts. Do not add tests for `lookup_ifsc`, `lookup_pincode`, or
 Live-API checks belong in [scripts/smoke_test.py](scripts/smoke_test.py), which is run
 by hand and is not collected by pytest.
 
-The suite is 17 tests and finishes in ~0.01s. If it ever pauses, something started
-making a network call — treat that as a failure, not flakiness.
+The offline suite is 121 tests and finishes in a few seconds; API tests patch
+`socket.connect` to fail. If it ever pauses, something started making a network call —
+treat that as a failure, not flakiness.
 
-There is no `[tool.pytest]` config, so `pytest tests/` only resolves imports when the
-package is installed editable:
-
-```bash
-pip install -e ".[dev]" && pytest tests/ -v
-```
-
-Without that, put `src` on the path explicitly:
+`pyproject.toml` sets `testpaths = ["tests"]` and `pythonpath = ["src"]`. The API tests
+need the `api` extra:
 
 ```bash
-PYTHONPATH=src python -m pytest tests/ -q
+pip install -e ".[api,dev]" && pytest -q
 ```
+
+Tests that need MongoDB live outside `tests/`: `integration/` (skipped unless
+`NAV_TEST_MONGO_URL` is set) and `python scripts/run_isolated_checks.py`, which starts
+its own temporary `mongod`. They only ever drop databases whose names they generated.
 
 ```bash
 PYTHONPATH=src python3 scripts/smoke_test.py
@@ -169,7 +181,9 @@ is gated). Preserve those notes; add equivalents for new tools.
 - Compiled module-level `re` patterns, named `<THING>_PATTERN`.
 - Module docstrings explain the *domain* (what a GSTIN's 15 characters mean), not just
   the code. Keep that — it's why the algorithms are auditable.
-- Dependencies are `fastmcp` and `httpx`. Adding a third needs a real reason.
+- Core dependencies are `fastmcp` and `httpx`; the MCP server must run with only these.
+  FastAPI, Pydantic, Uvicorn, PyMongo and python-multipart live in the `api` extra;
+  Airflow only in `Dockerfile.airflow`. Adding a dependency needs a real reason.
 
 ## Release
 

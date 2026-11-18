@@ -52,7 +52,7 @@ MongoDB services, credentials, accounts, volumes and application data were not u
 | `claims_and_stale_writers` | Twelve job claims yield one owner; eight NAV claims yield one owner; old transaction snapshot and old token cannot write after takeover |
 | `expired_worker_token` | Reclaimed worker token blocks the old ingestion transaction even while it still has a global source token |
 | `ordered_commit_and_reconciliation` | Acquisition cannot pass an uncommitted fenced transaction; after takeover old writes fail; live runs stay live, expired and abandoned-starting runs reconcile |
-| `renewal_and_cancellation` | One-second lease survives a slower source through heartbeats; cancellation records interruption and releases ownership |
+| `renewal_and_cancellation` | Two-second lease survives a three-second source through heartbeats; cancellation records interruption and releases ownership |
 | `disconnect_and_reconcile` | Actually closed Mongo client cannot save final status; a recovered client and fenced takeover reconcile the stranded running attempt |
 | `oversize_and_metrics` | Missing-length streamed response stops after two chunks and closes; metrics handle failure streaks, source freshness, exact write counts and unknown legacy counters |
 
@@ -98,3 +98,76 @@ or live-provider contract test is not claimed. See the remaining limitations in
 No MCP registration/tool module, dependency manifest or existing NAV unique index
 was replaced. Unrelated pre-existing changes (the deleted desktop config example,
 untracked `.sf/` and `AGENTS.md`) are intentionally outside these commits.
+
+## Phase 2: integration, monitoring and deployment verification (2026-11-18)
+
+Environment: macOS arm64, MongoDB 7.0.23 (`mongod` on PATH), fresh uv environments
+for Python 3.10.20, 3.11 and 3.12.13 under the session scratchpad. Docker 29.7.2,
+Airflow 3.3.2 image, isolated Compose project `bharatpay-p2verify` with new volumes.
+HTTP check counts vary between runs (62–68) because status polls are counted; the
+assertions are identical.
+
+| Check | Result | Label |
+| --- | --- | --- |
+| `pytest tests/ -q` on 3.10 / 3.11 / 3.12 | **121 passed** on each (94 previous + 27 new) | Runtime-tested |
+| `scripts/run_isolated_checks.py` | **Passed**: 68 HTTP checks, 11 NAV scenarios, 11 integration pytest, CLI replay, standalone refusal, alert exit code | Runtime-tested |
+| Two workers on one queue | 6 concurrent CSV jobs × 20 rows: each completed with `attempts == 1`, exactly 20 row documents per job | Runtime-tested |
+| API → job → worker → fenced NAV ETL | 202, duplicate queue 409, worker run `trigger=worker`, `source_kind=fixture`, history readable | Runtime-tested |
+| Retry after partial failure | Retried job re-completes with the same 2 row documents | Runtime-tested |
+| Health classification (`health_signals`) | never-executed, per-trigger failures, stalled vs polling worker, queue wait, reclaim streaks on real Mongo | Runtime-tested |
+| `check_health.py` exit codes | Exits 1 with `FAILED worker` when no worker presence exists | Runtime-tested |
+| Compose config: 4 supported combinations + fixture override | All valid; new volume, loopback ports, no Mongo host port | Runtime-tested (client-side) |
+| Docker image build (API, worker, Airflow 3.3.2) | Built; pip hash verification on. One earlier attempt failed a pymongo wheel hash check through Docker Desktop's proxy right after a forced daemon restart; host downloads matched PyPI and the retry passed | Runtime-tested |
+| Stack startup (`bharatpay-p2verify`, fresh volumes) | mongo, api, worker healthy in 25 s; `mongo-init` exit 0, and exit 0 again when re-run on the initialized set | Runtime-tested |
+| Replica set | `bharatpay-rs`, one PRIMARY, writable | Runtime-tested |
+| `/health`, `/ready`, metrics auth | 200, 200 (`persistence: true`), 401 without token | Runtime-tested |
+| Backend + NAV fault suite inside the API container | 62 HTTP checks and 11 NAV scenarios passed on the final images | Runtime-tested |
+| Mongo stopped for 20 s | Worker kept running (0 restarts), logged sanitized warnings, recovered healthy; `/ready` 503; `check_health.py` exit 2 | Runtime-tested |
+| Worker process SIGKILL | Container restarted by policy within 3 s; healthy again | Runtime-tested |
+| Health script on the live stack | All six components healthy, exit 0, with `HEALTH_EXPECT_AIRFLOW=1` | Runtime-tested |
+| Airflow DAG import and contract (`check_dag.py`) | Passed in the Airflow 3.3.2 image | Runtime-tested |
+| Airflow task execution (`airflow dags test`) | See scenario table below | Runtime-tested |
+| CI `containers` job | Written; not executed on GitHub | Not yet verified |
+| Static DAG contract (AST) | id, schedule, catchup, max runs, single task, error mapping present | Runtime-tested (offline) |
+
+### Airflow scenarios (real `airflow dags test`, isolated stack, synthetic sources)
+
+| Scenario | Fault injected | Airflow outcome | MongoDB `ingestion_runs` |
+| --- | --- | --- | --- |
+| Success | none (fixture) | task `success`, run successful | `completed`, `trigger=airflow`, accepted 2, rejected 1 |
+| Invalid records | fixture has one invalid row | `success` | `rejected_count=1` recorded, valid rows written |
+| Duplicate ingestion | same fixture again | `success` | `completed`, 0 inserted, 2 matched |
+| Zero valid records | mounted file with only invalid rows | `AirflowFailException`, `failed`, **no retry** | `failed`, `parse`, 0 written |
+| Provider failure | HTTPS proxy to a closed port (AMFI never contacted) | 3 attempts 5 min apart (14:10:48, 14:15:50, 14:20:52), then `failed` | 3 × `failed`, `source_network` |
+| Database failure | unresolvable `MONGO_URL` | 3 attempts 5 min apart, then `failed` | none: the DB is the failure; only Airflow logs record it |
+| Ingestion already running | live foreign NAV lease seeded | 2 × `up_for_retry` (`IngestionBusy`) | 2 × `skipped`, `coordination_busy` |
+| Retryable failure then success | same run: the foreign lease expired before attempt 3 | 3rd attempt `success` | `completed` |
+| Recovery after interruption | abandoned `running` run with an expired lease | `success` | abandoned run → `interrupted`, `write_outcome=partial_or_unknown`; lease reclaims 2 |
+
+Running against the actual Airflow image found two problems that offline checks
+missed. The DAG imported `AirflowFailException` from `airflow.exceptions`, which
+is deprecated in 3.3 (same class, so behavior was already correct); it now uses
+`airflow.sdk.exceptions`. `check_dag.py` assumed `DagBag` and timetable APIs
+that 3.3 does not have. Both are fixed and re-verified.
+
+Review findings fixed before commit: fixture-sourced runs and snapshots recorded
+`source` as the AMFI URL, so synthetic NAV rows looked like live data. They now
+record `source=file:<name>` and `source_kind=fixture` (verified on the rebuilt
+stack). `renewal_and_cancellation` failed once in 11 runs at load average ~11
+with a 1-second lease: a renewal arrived late and the fence correctly refused the
+write. Its margin was widened (2 s lease, 3 s source); later runs passed.
+
+Found while inspecting (read-only) the pre-existing `bharatpay-mcp` Compose project:
+after Docker Desktop restarted, only its worker (`restart: unless-stopped`) came back.
+`mongo` and `api` had no restart policy, so the worker crash-looped (restart count 7)
+with a full `ServerSelectionTimeoutError` traceback. Fixed in configuration
+(restart policies) and code (startup backoff); that project itself was not touched.
+
+Not demonstrated by any test: worker SIGKILL **mid-job** followed by reclaim after
+a real 120 s lease expiry (an idle worker kill/restart and the expired-lease claim
+path are tested separately), Airflow under a live scheduler (`dags test` runs the
+task in-process with real retry delays), multi-member
+failover, network partitions, and live AMFI contract. Guarantees shown: one lease
+holder per claim among 12 concurrent claimants; no stale NAV batch commits after a
+newer lease grant; stable row ids make CSV retries idempotent. Execution remains at
+least once, not exactly once.
