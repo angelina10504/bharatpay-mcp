@@ -1,0 +1,16 @@
+# TEST ONLY. Every NAV trigger (worker, CLI, Airflow) replays the synthetic
+# fixture instead of downloading AMFI. Combine with compose.yaml and
+# compose.nav-replica.yaml under a NEW project name; never with a real deployment.
+x-fixture: &fixture
+  NAV_SOURCE_FILE: /opt/project/tests/fixtures/nav_synthetic.txt
+services:
+  api:
+    environment:
+      NAV_SOURCE_FILE: /app/tests/fixtures/nav_synthetic.txt
+  worker:
+    environment:
+      NAV_SOURCE_FILE: /app/tests/fixtures/nav_synthetic.txt
+  airflow:
+    environment:
+      <<: *fixture
+      HEALTH_EXPECT_AIRFLOW: "1"

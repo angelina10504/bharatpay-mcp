@@ -127,6 +127,16 @@ async def download_source(client: httpx.AsyncClient, limit: int) -> SourceArtifa
     return SourceArtifact(bytes(content), digest.hexdigest(), now())
 
 
+def configured_source_file() -> Path | None:
+    """NAV_SOURCE_FILE replays a saved file for every trigger instead of HTTP.
+
+    Meant for retained-artifact replay and isolated tests; each run records
+    source_kind=fixture, so a misconfigured deployment is visible in metrics.
+    """
+    value = os.getenv("NAV_SOURCE_FILE")
+    return Path(value) if value else None
+
+
 def read_fixture(path: Path, limit: int) -> SourceArtifact:
     try:
         with path.open("rb") as source:

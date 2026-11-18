@@ -15,7 +15,8 @@ from pymongo.errors import BulkWriteError, PyMongoError
 from bharatpay_mcp.services.nav import AMFI_URL, parse_nav
 from bharatpay_mcp.services.nav_coordination import NavLease, LeaseLost
 from bharatpay_mcp.services.nav_source import (
-    IngestionError, QualityRules, byte_limit, download_source, read_fixture, retain_artifact,
+    IngestionError, QualityRules, byte_limit, configured_source_file, download_source, read_fixture,
+    retain_artifact,
 )
 from bharatpay_mcp.storage import Store, now, public
 
@@ -38,6 +39,7 @@ async def ingest_nav(store: Store, client: httpx.AsyncClient, job_id: str | None
     counters commit together, allowing ambiguous outcomes to be read back.
     """
     trigger = trigger or ("worker" if job_id or job else "cli")
+    fixture = fixture or configured_source_file()
     if trigger not in {"cli", "worker", "airflow"} or not 1 <= batch_size <= 1000:
         raise ValueError("Invalid ingestion trigger or batch size")
     if job is not None:
@@ -47,10 +49,12 @@ async def ingest_nav(store: Store, client: httpx.AsyncClient, job_id: str | None
         if not job or not job.get("lease_token"):
             raise LeaseLost()
     run_id, started = str(uuid4()), now()
+    # Replayed files must never look like live AMFI data; record the name only, no host path.
+    source, kind = (f"file:{fixture.name}", "fixture") if fixture else (AMFI_URL, "http")
     lease = NavLease(store, run_id, job=job, seconds=lease_seconds)
     await store.insert("ingestion_runs", {
         "_id": run_id, "run_id": run_id, "trigger": trigger, "job_id": job_id,
-        "status": "starting", "source": AMFI_URL, "source_kind": "fixture" if fixture else "http",
+        "status": "starting", "source": source, "source_kind": kind,
         "started_at": started, "finished_at": None, "duration_seconds": None,
         "source_sha256": None, "source_bytes": None, "source_complete": False,
         "parsed_count": 0, "accepted": 0, "rejected_count": 0, "rejected_rows": [],
@@ -79,7 +83,7 @@ async def ingest_nav(store: Store, client: httpx.AsyncClient, job_id: str | None
                 stamp = now()
                 operations = [UpdateOne({"scheme_code": row["scheme_code"], "date": row["date"]},
                     {"$set": {**row, "fetched_at": artifact.fetched_at, "ingested_at": stamp,
-                              "source": AMFI_URL, "source_sha256": artifact.sha256,
+                              "source": source, "source_kind": kind, "source_sha256": artifact.sha256,
                               "run_id": run_id, "coordination_version": lease.version}}, upsert=True) for row in batch]
                 result = await store.db.nav_snapshots.bulk_write(operations, ordered=False, session=session)
                 counted = await store.db.ingestion_runs.update_one(
