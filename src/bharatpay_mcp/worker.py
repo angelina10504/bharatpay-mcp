@@ -6,10 +6,12 @@ from contextlib import suppress
 from datetime import timedelta
 import logging
 import os
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
 from pydantic import ValidationError
+from pymongo.errors import PyMongoError
 
 from bharatpay_mcp.api.workbench import VendorInput
 from bharatpay_mcp.services.ingestion import ingest_nav
@@ -100,10 +102,30 @@ async def process_job(store: Store, client: httpx.AsyncClient, job: dict):
                 await pending
 
 
+async def connect(store: Store):
+    # Compose orders startup, but a restarted daemon or replica election can
+    # still leave Mongo briefly unreachable: wait instead of crash-looping.
+    delay = 1
+    while True:
+        try:
+            return await store.start()
+        except PyMongoError:
+            logger.warning("Database unavailable at startup; retrying in %s seconds", delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+
+
+def touch(path: str | None):
+    # Container healthcheck evidence that the claim loop, not just the process, advances.
+    if path:
+        Path(path).touch()
+
+
 async def main():
     store = Store(os.environ["MONGO_URL"])
-    await store.start()
+    await connect(store)
     worker_id = str(uuid4())
+    alive = os.getenv("WORKER_HEALTH_FILE")
     async def presence():
         while True:
             stamp = now()
@@ -118,14 +140,21 @@ async def main():
             except Exception:
                 logger.warning("Worker heartbeat unavailable")
                 await asyncio.sleep(5)
+    async def mark(**values):
+        # No upsert: presence owns creation, heartbeat and expiry of this document.
+        await store.db.worker_states.update_one({"_id": worker_id}, {"$set": values})
     heartbeat_task = asyncio.create_task(monitor())
     try:
         async with httpx.AsyncClient(limits=httpx.Limits(max_connections=12)) as client:
             while True:
                 try:
                     job = await store.claim()
+                    await mark(polled_at=now(), current_job_id=job["_id"] if job else None)
+                    touch(alive)
                     if job:
                         await process_job(store, client, job)
+                        await mark(current_job_id=None)
+                        touch(alive)
                     else:
                         await asyncio.sleep(2)
                 except Exception:
