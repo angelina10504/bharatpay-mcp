@@ -69,13 +69,19 @@ def main():
             url = f'mongodb://127.0.0.1:{mongo_port}/?replicaSet=navtest'
             environment = {**os.environ, 'MONGO_URL': url, 'MONGO_DATABASE': 'bharatpay_isolated_backend',
                            'NAV_TEST_MONGO_URL': url, 'API_BASE_URL': f'http://127.0.0.1:{api_port}',
-                           'PYTHONUNBUFFERED': '1'}
+                           'PYTHONUNBUFFERED': '1', 'EXPECTED_WORKERS': '2'}
             # Do not inherit source retention or quality overrides into fixtures.
             for key in list(environment):
                 if key.startswith('NAV_') and key != 'NAV_TEST_MONGO_URL':
                     environment.pop(key)
-            start('api', [sys.executable, '-m', 'uvicorn', 'bharatpay_mcp.api.app:app', '--host', '127.0.0.1', '--port', str(api_port)], environment)
-            start('worker', [sys.executable, '-m', 'bharatpay_mcp.worker'], environment)
+            # Services replay the synthetic fixture for queued NAV jobs. The check
+            # processes must not inherit it: it would override their mocked sources.
+            services = {**environment, 'NAV_SOURCE_FILE': str(ROOT / 'tests/fixtures/nav_synthetic.txt')}
+            environment['CHECK_WORKER_NAV'] = '1'
+            start('api', [sys.executable, '-m', 'uvicorn', 'bharatpay_mcp.api.app:app', '--host', '127.0.0.1', '--port', str(api_port)], services)
+            # Two workers compete for the same queue, as replicas would.
+            start('worker', [sys.executable, '-m', 'bharatpay_mcp.worker'], services)
+            start('worker-2', [sys.executable, '-m', 'bharatpay_mcp.worker'], services)
             def ready():
                 with urllib.request.urlopen(environment['API_BASE_URL'] + '/ready', timeout=1) as response:
                     return response.status == 200
@@ -88,6 +94,11 @@ def main():
             result = json.loads(cli.stdout)
             assert result['status'] == 'completed' and result['trigger'] == 'cli' and result['upserted_count'] == 2
             print('PASS NAV: actual CLI fixture replay')
+            health = subprocess.run([sys.executable, 'scripts/check_health.py', '--fail-on', 'failed'], cwd=ROOT,
+                                    env={**environment, 'MONGO_DATABASE': 'bharatpay_isolated_cli'}, text=True, capture_output=True)
+            # This database has a completed CLI run but no worker presence: the alert must fire.
+            assert health.returncode == 1 and 'FAILED          worker' in health.stdout, health.stdout
+            print('PASS HEALTH: alert script exits 1 when no worker heartbeat exists')
             standalone_port = free_port()
             standalone_data = temporary / 'standalone'
             standalone_data.mkdir()
