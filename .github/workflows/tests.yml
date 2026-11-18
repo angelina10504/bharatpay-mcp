@@ -21,6 +21,8 @@ jobs:
       NAV_TEST_MONGO_URL: mongodb://127.0.0.1:27017/?replicaSet=navtest
       MONGO_DATABASE: bharatpay_ci
       API_BASE_URL: http://127.0.0.1:8000
+      EXPECTED_WORKERS: "2"
+      CHECK_WORKER_NAV: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,10 +53,14 @@ jobs:
               raise SystemExit('Test replica set did not become ready')
           client.close()
           PY
-      - name: Start backend and worker
+      - name: Start backend and two workers
+        # Services replay the synthetic fixture for queued NAV jobs; the check
+        # steps below must not inherit it, because it overrides mocked sources.
         run: |
+          export NAV_SOURCE_FILE="$PWD/tests/fixtures/nav_synthetic.txt"
           python -m uvicorn bharatpay_mcp.api.app:app --host 127.0.0.1 --port 8000 > /tmp/bharatpay-api.log 2>&1 &
           python -m bharatpay_mcp.worker > /tmp/bharatpay-worker.log 2>&1 &
+          python -m bharatpay_mcp.worker > /tmp/bharatpay-worker-2.log 2>&1 &
       - name: Wait for database readiness
         run: |
           python - <<'PY'
@@ -70,11 +76,47 @@ jobs:
           PY
       - run: python scripts/check_backend.py
       - run: python -m pytest integration/ -q
+      - name: Alert check passes against the live CI stack
+        run: python scripts/check_health.py --fail-on failed
       - name: Failure diagnostics
         if: failure()
         run: |
           cat /tmp/bharatpay-api.log
           cat /tmp/bharatpay-worker.log
+          cat /tmp/bharatpay-worker-2.log
       - name: Stop only the test Mongo container
         if: always()
         run: docker stop bharatpay-nav-ci || true
+  containers:
+    runs-on: ubuntu-latest
+    env:
+      # A job-specific project on a disposable runner; no volume is ever removed.
+      COMPOSE_PROJECT_NAME: bharatpay-ci
+      COMPOSE_FILE: compose.yaml:compose.nav-replica.yaml:compose.fixture.yaml
+      API_PORT: "18011"
+      AIRFLOW_PORT: "18081"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate every supported Compose combination
+        run: |
+          for combo in "-f compose.yaml" "-f compose.yaml --profile airflow" \
+                       "-f compose.yaml -f compose.nav-replica.yaml" \
+                       "-f compose.yaml -f compose.nav-replica.yaml --profile airflow"; do
+            docker compose $combo config -q
+          done
+      - name: Build images and start the replica-set stack
+        run: docker compose up --build -d --wait --wait-timeout 300
+      - name: Backend, worker and NAV fault checks inside the API container
+        run: docker compose exec -T -e NAV_SOURCE_FILE= -e CHECK_WORKER_NAV=1 api python scripts/check_backend.py
+      - name: Airflow DAG import, contract and error mapping
+        run: docker compose --profile airflow run --rm --no-deps airflow python /opt/project/scripts/check_dag.py
+      - name: Airflow task execution writes through the shared service
+        run: docker compose --profile airflow run --rm --no-deps airflow bash -c "airflow db migrate && airflow dags test bharatpay_daily_nav"
+      - name: Alert check sees healthy worker and Airflow schedule
+        run: docker compose exec -T -e HEALTH_EXPECT_AIRFLOW=1 api python scripts/check_health.py --fail-on degraded
+      - name: Failure diagnostics
+        if: failure()
+        run: docker compose --profile airflow logs --no-color --tail 200
+      - name: Stop the job's containers (volumes are kept)
+        if: always()
+        run: docker compose --profile airflow down
