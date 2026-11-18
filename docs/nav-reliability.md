@@ -93,6 +93,7 @@ parser, quality rules, coordination and writes as HTTP. UTF-8/BOM input is accep
 | `NAV_MAX_SOURCE_AGE_DAYS` | unset | Maximum age of the oldest accepted source date |
 | `NAV_MAX_FUTURE_DAYS` | unset | Maximum future offset of the newest source date |
 | `NAV_RAW_DIR` | unset | Optional local directory for SHA-named raw artifacts |
+| `NAV_SOURCE_FILE` | unset | Replay this saved file instead of downloading, for every trigger; runs record `source_kind=fixture`. Test and replay only |
 
 Quality defaults preserve the original parser's acceptance policy. Choose stricter
 thresholds after measuring a representative feed; funds can carry different NAV

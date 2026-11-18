@@ -49,6 +49,14 @@ async def main():
             await call("GET", "/api/v1/ingestions/metrics", status=401)
             metrics = (await call("GET", "/api/v1/ingestions/metrics", a)).json()
             assert metrics["transaction_capable"] and metrics["workers"]["active"] >= 1
+            expected_workers = int(os.getenv("EXPECTED_WORKERS", "1"))
+            for _ in range(15):
+                if metrics["workers"]["polling"] + metrics["workers"]["busy"] >= expected_workers:
+                    break
+                await asyncio.sleep(1)
+                metrics = (await call("GET", "/api/v1/ingestions/metrics", a)).json()
+            assert metrics["health"]["components"]["worker"]["status"] == "healthy", metrics["workers"]
+            assert metrics["health"]["components"]["database"]["status"] == "healthy"
             await call("GET", "/api/v1/vendors", status=401)
             vendor = (await call("POST", "/api/v1/vendors", a, status=201,
                                  json={"name": "Synthetic demo", "pan": "ABCPE1234F"})).json()
@@ -79,6 +87,49 @@ async def main():
             assert {r["status"] for r in rows} == {"valid", "invalid"}
             report = await call("GET", f"/api/v1/batch-jobs/{job['id']}/report.csv", a)
             assert "'=SUM" in report.text
+            # Several queued jobs at once: with multiple workers each job is claimed by
+            # one lease holder and every row has exactly one stable result document.
+            many = [(await call("POST", "/api/v1/batch-jobs", b, status=202,
+                                files={"file": ("bulk.csv", "name,pan\n" + "".join(f"Row {n},ABCPE1234F\n" for n in range(20)),
+                                                "text/csv")})).json()["id"] for _ in range(6)]
+            for _ in range(60):
+                states = [(await call("GET", f"/api/v1/batch-jobs/{job_id}", b)).json() for job_id in many]
+                if all(state["status"] == "completed" for state in states):
+                    break
+                await asyncio.sleep(1)
+            assert all(state["status"] == "completed" and state["processed"] == 20 and state["attempts"] == 1
+                       for state in states), states
+            for job_id in many:
+                assert await store.db.batch_rows.count_documents({"job_id": job_id}) == 20
+            retried = await call("POST", f"/api/v1/batch-jobs/{job['id']}/retry", a)
+            assert retried.json()["status"] == "queued"
+            await call("POST", f"/api/v1/batch-jobs/{job['id']}/retry", b, status=409)
+            for _ in range(30):
+                current = (await call("GET", f"/api/v1/batch-jobs/{job['id']}", a)).json()
+                if current["status"] in {"completed", "completed_with_errors", "failed"}:
+                    break
+                await asyncio.sleep(1)
+            assert current["status"] == "completed_with_errors"
+            assert await store.db.batch_rows.count_documents({"job_id": job["id"]}) == 2  # stable row ids on retry
+            if os.getenv("CHECK_WORKER_NAV"):
+                # API -> queued job -> worker -> fenced ETL. Requires the workers to
+                # run with NAV_SOURCE_FILE set to the synthetic fixture (no AMFI call).
+                queued = (await call("POST", "/api/v1/ingestions/nav", a, status=202)).json()
+                await call("POST", "/api/v1/ingestions/nav", b, status=409)  # one active refresh across users
+                for _ in range(30):
+                    nav_job = (await call("GET", f"/api/v1/batch-jobs/{queued['id']}", a)).json()
+                    if nav_job["status"] in {"completed", "failed"}:
+                        break
+                    await asyncio.sleep(1)
+                assert nav_job["status"] == "completed", nav_job
+                summary = nav_job["summary"]
+                assert summary["trigger"] == "worker" and summary["source_kind"] == "fixture"
+                assert (summary["accepted"], summary["rejected_count"]) == (2, 1)
+                assert summary["upserted_count"] + summary["matched_count"] == 2
+                metrics = (await call("GET", "/api/v1/ingestions/metrics", a)).json()
+                assert metrics["by_trigger"]["worker"]["last_completed"]["run_id"] == summary["run_id"]
+                history = (await call("GET", "/api/v1/funds/990001/nav-history", a)).json()
+                assert history["items"][0]["nav"] == "10.25"
             await call("POST", "/api/v1/auth/logout", a)
             await call("GET", "/api/v1/auth/me", a, status=401)
             await store.db.sessions.update_one({"owner_id": owners[1]}, {"$set": {"expires_at": now() - timedelta(seconds=1)}})

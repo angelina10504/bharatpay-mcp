@@ -14,6 +14,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 15
+    restart: unless-stopped
   api:
     build: .
     ports:
@@ -30,17 +31,26 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+    restart: unless-stopped
   worker:
     build: .
     command: ["python", "-m", "bharatpay_mcp.worker"]
     environment:
       <<: *nav-environment
       MONGO_URL: mongodb://mongo:27017
+      WORKER_HEALTH_FILE: /tmp/worker.alive
     depends_on:
       mongo:
         condition: service_healthy
     init: true
     restart: unless-stopped
+    # Healthy only while the claim loop advances, not merely while the process exists.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/worker.alive') > 300)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
   airflow:
     profiles: ["airflow"]
     build:

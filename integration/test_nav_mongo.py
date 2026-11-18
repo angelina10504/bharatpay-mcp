@@ -14,7 +14,7 @@ from scripts import check_nav
     check_nav.concurrent_entrypoints, check_nav.claims_and_stale_writers,
     check_nav.expired_worker_token, check_nav.renewal_and_cancellation,
     check_nav.disconnect_and_reconcile, check_nav.ordered_commit_and_reconciliation,
-    check_nav.oversize_and_metrics,
+    check_nav.oversize_and_metrics, check_nav.health_signals,
 ])
 def test_isolated_nav_scenario(scenario):
     url = os.environ.get("NAV_TEST_MONGO_URL")

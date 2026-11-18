@@ -21,7 +21,7 @@ from pymongo.errors import OperationFailure
 from bharatpay_mcp.services.ingestion import ingest_nav
 from bharatpay_mcp.services.nav_coordination import EPOCH, LEASE_ID, IngestionBusy, LeaseLost, NavLease, reconcile_nav_runs
 from bharatpay_mcp.services.nav_source import IngestionError, QualityRules
-from bharatpay_mcp.services.nav_metrics import ingestion_metrics
+from bharatpay_mcp.services.nav_metrics import HealthLimits, ingestion_metrics
 from bharatpay_mcp.storage import Store, now
 from bharatpay_mcp.worker import process_job
 
@@ -85,6 +85,9 @@ async def replay_and_metadata(url):
         assert await store.db.nav_snapshots.count_documents({}) == 2
         snapshot = await store.db.nav_snapshots.find_one({'scheme_code': '990001'})
         assert snapshot['date'] == '2026-11-02' and snapshot['ingested_at'] >= snapshot['fetched_at']
+        # The fixture replay rewrote provenance: synthetic rows never claim to be AMFI data.
+        assert (snapshot['source'], snapshot['source_kind']) == ('file:nav_synthetic.txt', 'fixture')
+        assert (first['source_kind'], second['source']) == ('http', 'file:nav_synthetic.txt')
         indexes = await store.db.nav_snapshots.index_information()
         assert indexes['scheme_code_1_date_1']['unique']
 
@@ -235,15 +238,18 @@ async def ordered_commit_and_reconciliation(url):
 
 
 async def renewal_and_cancellation(url):
+    # The source outlasts the lease, so only renewals keep it alive. A 1-second
+    # lease flaked once under load (renewal >0.67 s late, correctly fenced); 2 s
+    # against a 3 s source keeps the property with 1.33 s of scheduling slack.
     entered = asyncio.Event()
     async def slow(request):
         entered.set()
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(3)
         return httpx.Response(200, content=CONTENT)
     async with database(url) as store, httpx.AsyncClient(transport=httpx.MockTransport(slow)) as client:
-        result = await ingest_nav(store, client, lease_seconds=1)
+        result = await ingest_nav(store, client, lease_seconds=2)
         assert result['status'] == 'completed'  # several heartbeat renewals
-        task = asyncio.create_task(ingest_nav(store, client, lease_seconds=1))
+        task = asyncio.create_task(ingest_nav(store, client, lease_seconds=2))
         entered.clear()
         await asyncio.wait_for(entered.wait(), 5)
         task.cancel()
@@ -319,6 +325,42 @@ async def oversize_and_metrics(url):
         assert metrics['last_completed']['upserted_count'] is None and metrics['legacy_runs_without_write_counts'] == 1
 
 
+async def health_signals(url):
+    limits = HealthLimits(expect_airflow=True)
+    async with database(url) as store:
+        empty = await ingestion_metrics(store, limits)
+        assert empty['health']['components']['nav_ingestion']['status'] == 'never_executed'
+        assert empty['health']['components']['airflow_schedule']['status'] == 'never_executed'
+        assert empty['health']['components']['worker']['status'] == 'failed'  # no presence on record
+        async with source() as client:
+            await ingest_nav(store, client, trigger='airflow')
+        async with source(b'') as client:
+            await expect_error(ingest_nav(store, client, trigger='cli'), 'parse')
+        metrics = await ingestion_metrics(store, limits)
+        airflow, cli = metrics['by_trigger']['airflow'], metrics['by_trigger']['cli']
+        assert airflow['last_completed']['upserted_count'] == 2 and airflow['failures_since_success'] == 0
+        assert cli['last_completed'] is None and cli['failures_since_success'] == 1
+        assert metrics['by_trigger']['worker']['latest_attempt'] is None
+        assert metrics['health']['components']['airflow_schedule']['status'] == 'healthy'
+        assert metrics['health']['components']['nav_ingestion']['status'] == 'degraded'
+        # Presence without a recent claim poll is not a healthy worker.
+        await store.db.worker_states.insert_one({'_id': 'stalled', 'heartbeat_at': now(), 'polled_at': now() - timedelta(minutes=5)})
+        metrics = await ingestion_metrics(store, limits)
+        assert metrics['workers']['stalled'] == 1 and metrics['health']['components']['worker']['status'] == 'degraded'
+        await store.db.worker_states.insert_one({'_id': 'polling', 'heartbeat_at': now(), 'polled_at': now()})
+        assert (await ingestion_metrics(store, limits))['health']['components']['worker']['status'] == 'healthy'
+        # A retried job is measured from its last state change, not creation.
+        await store.insert('batch_jobs', {'kind': 'validate_csv', 'status': 'queued', 'attempts': 0,
+                                          'created_at': now() - timedelta(days=2), 'updated_at': now() - timedelta(minutes=10)})
+        await store.insert('batch_jobs', {'kind': 'validate_csv', 'status': 'running', 'attempts': 2, 'lease_reclaims': 2,
+                                          'lease_until': now() + timedelta(minutes=1)})
+        metrics = await ingestion_metrics(store, limits)
+        assert 590 <= metrics['queue']['oldest_queued_age_seconds'] < 900
+        assert metrics['queue']['max_active_lease_reclaims'] == 2
+        components = metrics['health']['components']
+        assert components['job_queue']['status'] == 'degraded' and components['leases']['status'] == 'degraded'
+
+
 async def standalone_rejection(url):
     async with database(url) as store:
         hello = await store.db.command('hello')
@@ -339,7 +381,7 @@ async def run_nav_checks(url):
     # downgrade the tests silently when pointed at a standalone server.
     checks = [replay_and_metadata, bad_feeds, bulk_failures, concurrent_entrypoints,
               claims_and_stale_writers, expired_worker_token, ordered_commit_and_reconciliation,
-              renewal_and_cancellation, disconnect_and_reconcile, oversize_and_metrics]
+              renewal_and_cancellation, disconnect_and_reconcile, oversize_and_metrics, health_signals]
     for check in checks:
         await asyncio.wait_for(check(url), 45)
         print('PASS NAV:', check.__name__)
