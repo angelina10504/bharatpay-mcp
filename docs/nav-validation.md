@@ -102,7 +102,7 @@ untracked `.sf/` and `AGENTS.md`) are intentionally outside these commits.
 ## Phase 2: integration, monitoring and deployment verification (2026-11-18)
 
 Environment: macOS arm64, MongoDB 7.0.23 (`mongod` on PATH), fresh uv environments
-for Python 3.10.20, 3.11 and 3.12.13 under the session scratchpad. Docker 29.7.2,
+for Python 3.10.20, 3.11 and 3.12.13 in temporary virtual environments. Docker 29.7.2,
 Airflow 3.3.2 image, isolated Compose project `bharatpay-p2verify` with new volumes.
 HTTP check counts vary between runs (62–68) because status polls are counted; the
 assertions are identical.
