@@ -1,4 +1,5 @@
 # 🇮🇳 BharatPay MCP
+A Python fintech data platform combining AI-agent tools, authenticated REST APIs, asynchronous batch processing, and fault-tolerant financial data ingestion using FastAPI, MongoDB, and Apache Airflow.
 
 ## Workbench backend
 
